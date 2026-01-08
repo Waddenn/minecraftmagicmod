@@ -42,14 +42,39 @@ public class SpectralGrimoireItem extends Item {
                 return InteractionResult.CONSUME;
             } else {
                 // LAUNCH MODE: INSTANT FIRE
+                // Smart Selection: Choose the sword most aligned with player's look direction
+                // This prevents "sideways" launches by picking the sword arguably "in front" of the camera.
+                final net.minecraft.world.phys.Vec3 playerLook = player.getLookAngle();
+                final net.minecraft.world.phys.Vec3 playerEye = player.getEyePosition();
+                
                 FloatingWeaponEntity weaponToLaunch = orbitingWeapons.stream()
-                    .min(Comparator.comparingDouble(w -> w.distanceTo(player)))
+                    .max(Comparator.comparingDouble(w -> {
+                        net.minecraft.world.phys.Vec3 dirToSword = w.position().subtract(playerEye).normalize();
+                        return dirToSword.dot(playerLook);
+                    }))
                     .orElse(orbitingWeapons.get(0));
                 
                 // AIMING LOGIC
+                // Perform a RayCast (Clip) to find exactly what the player is looking at
+                // This allows the sword to converge on the target from its orbit position
                 net.minecraft.world.phys.Vec3 eyePos = player.getEyePosition();
                 net.minecraft.world.phys.Vec3 lookVec = player.getLookAngle();
-                net.minecraft.world.phys.Vec3 targetPos = eyePos.add(lookVec.scale(50.0));
+                net.minecraft.world.phys.Vec3 endPos = eyePos.add(lookVec.scale(100.0)); // 100 blocks range
+                
+                net.minecraft.world.level.ClipContext context = new net.minecraft.world.level.ClipContext(
+                    eyePos, endPos, 
+                    net.minecraft.world.level.ClipContext.Block.COLLIDER, 
+                    net.minecraft.world.level.ClipContext.Fluid.NONE, 
+                    player
+                );
+                
+                net.minecraft.world.phys.HitResult hitResult = level.clip(context);
+                net.minecraft.world.phys.Vec3 targetPos = hitResult.getLocation();
+                
+                // If we didn't hit anything close, use the far end point
+                if (hitResult.getType() == net.minecraft.world.phys.HitResult.Type.MISS) {
+                    targetPos = endPos;
+                }
                 
                 net.minecraft.world.phys.Vec3 swordPos = weaponToLaunch.position();
                 net.minecraft.world.phys.Vec3 launchDir = targetPos.subtract(swordPos).normalize();

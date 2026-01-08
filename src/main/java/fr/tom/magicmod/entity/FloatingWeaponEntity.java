@@ -1,249 +1,200 @@
 package fr.tom.magicmod.entity;
 
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundEvents;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
-import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.level.Level;
-import net.minecraft.world.phys.Vec3;
-import net.minecraft.network.syncher.SynchedEntityData;
 import net.minecraft.world.entity.LivingEntity;
-import net.minecraft.core.particles.ParticleTypes;
-import net.minecraft.world.phys.AABB;
-import net.minecraft.world.level.storage.ValueOutput;
-import net.minecraft.world.level.storage.ValueInput;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.projectile.arrow.AbstractArrow;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.EntityHitResult;
+import net.minecraft.world.phys.Vec3;
 
-import java.util.List;
-import java.util.UUID;
-
-public class FloatingWeaponEntity extends Entity {
-    private UUID ownerUUID;
+public class FloatingWeaponEntity extends AbstractArrow {
+    // Projectile handles owner
     private int orbitIndex = 0;
     private float orbitAngle = 0;
     private static final float ORBIT_RADIUS = 2.0f;
-    private static final float ORBIT_SPEED = 0.08f;
-    private static final float DAMAGE = 4.0f;
-    
-    // State machine
-    private boolean isLaunched = false;
-    private Vec3 launchDirection = Vec3.ZERO;
-    private int lifeTime = 0;
-    private boolean isStuck = false;
-    
-    // Synched Data
+    private static final float ORBIT_SPEED = 0.05f; // Adjusted speed
+    private static final double DAMAGE = 6.0;
+
+    // Custom Synched Data for "Launched" state (AbstractArrow doesn't have a specific "launched" flag exposed easily for client rendering sync if we want to separate Orbit vs Projectile mode cleanly, though we could use shotFromCrossbow or similar, existing custom flag is safer)
     private static final net.minecraft.network.syncher.EntityDataAccessor<Boolean> LAUNCHED = 
         SynchedEntityData.defineId(FloatingWeaponEntity.class, net.minecraft.network.syncher.EntityDataSerializers.BOOLEAN);
-
-    public FloatingWeaponEntity(EntityType<?> type, Level level) {
-        super(type, level);
-        this.noPhysics = true;
-    }
+    // Synced Orbit Index to ensure Client/Server agree on position offset
+    private static final net.minecraft.network.syncher.EntityDataAccessor<Integer> ORBIT_INDEX = 
+        SynchedEntityData.defineId(FloatingWeaponEntity.class, net.minecraft.network.syncher.EntityDataSerializers.INT);
     
+    // Client-side Visuals for smooth launch transition
+    public Vec3 visualLaunchOffset = Vec3.ZERO;
+    public long clientLaunchTime = 0;
+
+    public FloatingWeaponEntity(EntityType<? extends AbstractArrow> type, Level level) {
+        super(type, level);
+        this.setBaseDamage(DAMAGE);
+        // "pickup" field might be protected or named differently. 
+        // If not accessible, we rely on getDefaultPickupItem returning EMPTY.
+        // this.pickup = AbstractArrow.Pickup.DISALLOWED; 
+        this.setNoGravity(true); // No gravity initially (while orbiting)
+    }
+
+    @Override
+    protected ItemStack getDefaultPickupItem() {
+        return ItemStack.EMPTY;
+    }
+
+    // Projectile has setOwner(Entity)
     public void setOwner(Player player) {
-        this.ownerUUID = player.getUUID();
+        super.setOwner(player);
     }
     
     public void setOrbitIndex(int index) {
-        this.orbitIndex = index;
-        this.orbitAngle = (float) (index * (Math.PI * 2 / 5.0));
+        this.entityData.set(ORBIT_INDEX, index);
     }
     
+    public int getOrbitIndex() {
+        return this.entityData.get(ORBIT_INDEX);
+    }
+
     public void launch(Vec3 direction) {
-        this.isLaunched = true;
-        this.launchDirection = direction.normalize(); 
         this.entityData.set(LAUNCHED, true);
-        this.lifeTime = 0; 
+        // this.setNoGravity(false); // Disable gravity enable - keep it noGravity=true for straight flight
         
-        // Initial Velocity (Power of the throw)
-        this.setDeltaMovement(this.launchDirection.scale(2.5)); // High initial speed
+        // AbstractArrow shoot logic
+        // method signature: shoot(x, y, z, velocity, inaccuracy)
+        this.shoot(direction.x, direction.y, direction.z, 2.5f, 0.0f);
         
-        // Initial rotation aligned with velocity
-        double d = this.launchDirection.horizontalDistance();
-        this.setYRot((float)(net.minecraft.util.Mth.atan2(this.launchDirection.x, this.launchDirection.z) * 57.2957763671875));
-        this.setXRot((float)(net.minecraft.util.Mth.atan2(this.launchDirection.y, d) * 57.2957763671875));
+        // Force rotation update immediately to prevent 1-tick incorrect rendering
+        double horizontalDistance = Math.sqrt(direction.x * direction.x + direction.z * direction.z);
+        this.setYRot((float)(Math.atan2(direction.x, direction.z) * (180F / (float)Math.PI)));
+        this.setXRot((float)(Math.atan2(direction.y, horizontalDistance) * (180F / (float)Math.PI)));
         this.yRotO = this.getYRot();
         this.xRotO = this.getXRot();
+
+        // Play launch sound
+        this.playSound(SoundEvents.TRIDENT_THROW.value(), 1.0F, 1.0F);
     }
-    
+
     public boolean isLaunched() {
         return this.entityData.get(LAUNCHED);
     }
-    
+
+    private boolean clientLaunched = false;
+
+    @Override
+    public void onSyncedDataUpdated(net.minecraft.network.syncher.EntityDataAccessor<?> key) {
+        super.onSyncedDataUpdated(key);
+        if (LAUNCHED.equals(key)) {
+            boolean fired = this.entityData.get(LAUNCHED);
+            if (fired && !clientLaunched) {
+                // Just launched on client side.
+                // Snap rotation to velocity to prevent "Swoosh" interpolation from orbit angle.
+                this.clientLaunched = true;
+                
+                // We need to estimate rotation from velocity because updateRotation() might not have run yet
+                // or we want to force the snap before rendering.
+                Vec3 velocity = this.getDeltaMovement();
+                if (velocity.lengthSqr() > 0.001) {
+                    double horizontalDistance = Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+                    float yaw = (float)(Math.atan2(velocity.x, velocity.z) * (180F / (float)Math.PI));
+                    float pitch = (float)(Math.atan2(velocity.y, horizontalDistance) * (180F / (float)Math.PI));
+                    
+                    this.setYRot(yaw);
+                    this.setXRot(pitch);
+                    this.yRotO = yaw;
+                    this.xRotO = pitch;
+                }
+            }
+        }
+    }
+
     @Override
     public void tick() {
-        super.tick();
-        
-        if (level().isClientSide()) {
-            // Client logic (Particles)
-            if (isLaunched()) {
+        if (!isLaunched()) {
+            this.baseTick(); 
+            
+            // Server-Side Authority only.
+            // Client relies on high update frequency (updateInterval(1)) for interpolation.
+            this.baseTick(); 
+            
+            // Server-Side Authority only.
+            // Client relies on Renderer for smooth interpolation.
+            if (!this.level().isClientSide()) {
+                Entity owner = this.getOwner();
+                if (owner instanceof Player && owner.isAlive()) {
+                    long time = this.level().getGameTime();
+                    int index = getOrbitIndex();
+                    
+                    float currentAngle = (time * ORBIT_SPEED) + (float) (index * (Math.PI * 2 / 5.0));
+                    
+                    double x = owner.getX() + Math.cos(currentAngle) * ORBIT_RADIUS;
+                    double y = owner.getY() + 1.5 + Math.sin(currentAngle * 3) * 0.3;
+                    double z = owner.getZ() + Math.sin(currentAngle) * ORBIT_RADIUS;
+                    
+                    this.setPos(x, y, z);
+                    this.setDeltaMovement(Vec3.ZERO);
+                } else if (owner == null) {
+                     this.discard();
+                }
+            }
+        } else {
+            super.tick();
+            
+            if (this.level().isClientSide() && this.getDeltaMovement().lengthSqr() > 0.1) {
                  Vec3 movement = this.getDeltaMovement();
-                 if (movement.lengthSqr() > 0.1) {
-                    level().addParticle(ParticleTypes.SOUL_FIRE_FLAME,
+                 level().addParticle(ParticleTypes.SOUL_FIRE_FLAME,
                         this.getX() - movement.x * 0.5, 
                         this.getY() + 0.5 - movement.y * 0.5, 
                         this.getZ() - movement.z * 0.5,
                         0, 0, 0);
-                 }
-            } else {
-               // Orbiting particles...
-                if (random.nextFloat() < 0.1) {
-                    level().addParticle(ParticleTypes.SOUL_FIRE_FLAME,
-                        this.getX() + (random.nextDouble() - 0.5) * 0.5,
-                        this.getY() + 0.5 + (random.nextDouble() - 0.5) * 0.5,
-                        this.getZ() + (random.nextDouble() - 0.5) * 0.5,
-                        0, 0.02, 0);
-                }
             }
-            return;
         }
+    }
 
-        // Server Logic
-        Player owner = getOwner();
-        
-        // Despawn checks
-        if (!isLaunched && (owner == null || !owner.isAlive() || owner.distanceTo(this) > 32.0)) {
-            this.discard();
-            return;
-        }
-        
-        if (isLaunched()) {
-            if (this.isStuck) {
-                 // Stuck Logic: Don't move, just exist until timer runs out
-                 this.setDeltaMovement(Vec3.ZERO);
-                 
-                 lifeTime++;
-                 if (lifeTime > 400) { // 20 seconds
-                     this.discard();
-                 }
-                 return;
-            }
+    @Override
+    protected void onHitEntity(EntityHitResult result) {
+        super.onHitEntity(result);
+    }
 
-            // --- PHYSICS SIMULATION ---
-            
-            // 1. Move using current velocity
-            this.move(net.minecraft.world.entity.MoverType.SELF, this.getDeltaMovement());
-            
-            // 2. Update Rotation to follow velocity vector
-            Vec3 noteVelocity = this.getDeltaMovement();
-            if (noteVelocity.horizontalDistanceSqr() > 0.01) {
-                // Update rotation towards movement direction (Projectile.lerpRotation logic)
-                double d = noteVelocity.horizontalDistance();
-                this.setYRot((float)(net.minecraft.util.Mth.atan2(noteVelocity.x, noteVelocity.z) * 57.2957763671875));
-                this.setXRot((float)(net.minecraft.util.Mth.atan2(noteVelocity.y, d) * 57.2957763671875));
-            }
-            
-            // 3. Apply Drag (Air resistance)
-            // Tridents use 0.99 water / 0.99 air. We'll use 0.99 for "heavy" feel.
-            this.setDeltaMovement(this.getDeltaMovement().scale(0.99));
-            
-            // 4. Apply Gravity
-            // Only if not NoGravity. Swords are heavy.
-            if (!this.isNoGravity()) {
-                // Subtract gravity from Y velocity
-                this.setDeltaMovement(this.getDeltaMovement().add(0, -0.05, 0)); 
-            }
-            
-            lifeTime++;
-            
-            // --- COLLISION LOGIC ---
-            // Entity Collision
-            AABB collider = this.getBoundingBox().inflate(0.3); // Slightly larger hit box
-            List<LivingEntity> targets = level().getEntitiesOfClass(LivingEntity.class, collider);
-            
-            boolean hit = false;
-            for (LivingEntity target : targets) {
-                if (target != owner && target.isAlive() && (owner == null || !isAllied(target, owner))) {
-                    target.hurt(level().damageSources().playerAttack(owner), DAMAGE * 1.5f);
-                    hit = true;
-                    // Don't stick on entities, just pass through or maybe knockback? 
-                    // For now, let's keep pass-through behavior or we can stick to entity (complex).
-                    // User said "stuck", usually implies blocks.
-                }
-            }
-            
-            // Block Collision (checking checks from 'move')
-            // 'horizontalCollision' and 'verticalCollision' are set by move()
-            if (this.horizontalCollision || this.verticalCollision) {
-                // STUCK LOGIC
-                this.isStuck = true;
-                this.setDeltaMovement(Vec3.ZERO);
-                this.setNoGravity(true);
-                this.playSound(net.minecraft.sounds.SoundEvents.TRIDENT_HIT, 1.0F, 1.0F);
-                
-                // Reset lifetime to give it time to be seen
-                this.lifeTime = 0; 
-            }
-            
-            // Max flight time before auto-despawn (if void or sky)
-            if (lifeTime > 200 && !isStuck) { // 10 seconds flight
-                this.discard();
-            }
-            
-        } else {
-            // Orbiting Motion
-            if (owner != null) {
-                orbitAngle += ORBIT_SPEED;
-                if (orbitAngle > Math.PI * 2) {
-                    orbitAngle -= Math.PI * 2;
-                }
-                
-                double x = owner.getX() + Math.cos(orbitAngle) * ORBIT_RADIUS;
-                double y = owner.getY() + 1.5 + Math.sin(orbitAngle * 3) * 0.3;
-                double z = owner.getZ() + Math.sin(orbitAngle) * ORBIT_RADIUS;
-                
-                this.setPos(x, y, z);
-                
-                // Passive damage while orbiting
-                AABB damageBox = this.getBoundingBox().inflate(0.5);
-                List<LivingEntity> nearbyMobs = level().getEntitiesOfClass(LivingEntity.class, damageBox);
-                
-                for (LivingEntity mob : nearbyMobs) {
-                    if (mob != owner && mob.isAlive() && !isAllied(mob, owner)) {
-                        mob.hurt(level().damageSources().playerAttack(owner), DAMAGE);
-                        Vec3 direction = mob.position().subtract(owner.position()).normalize();
-                        mob.setDeltaMovement(mob.getDeltaMovement().add(direction.scale(0.3)));
-                    }
-                }
-            }
-        }
+    @Override
+    protected void onHitBlock(BlockHitResult result) {
+        super.onHitBlock(result); 
+        // TRIDENT_HIT is SoundEvent, TRIDENT_THROW is Holder (Mojang consistency...)
+        this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 1.0F);
     }
-    
-    private boolean isAllied(LivingEntity entity, Player owner) {
-        if (entity instanceof Player) {
-            return true;
-        }
-        if (entity.getTeam() != null && owner.getTeam() != null) {
-            return entity.getTeam().equals(owner.getTeam());
-        }
-        return false;
-    }
-    
-    public Player getOwner() {
-        if (ownerUUID != null && level() != null) {
-            return level().getPlayerByUUID(ownerUUID);
-        }
-        return null;
-    }
-    
+
     @Override
     protected void defineSynchedData(SynchedEntityData.Builder builder) {
+        super.defineSynchedData(builder); 
         builder.define(LAUNCHED, false);
+        builder.define(ORBIT_INDEX, 0); // Default index 0
     }
     
+    /*
     @Override
-    protected void addAdditionalSaveData(ValueOutput out) {
-        out.putBoolean("Launched", this.isLaunched);
+    public void addAdditionalSaveData(CompoundTag tag) {
+        super.addAdditionalSaveData(tag);
+        tag.putBoolean("Launched", this.isLaunched());
+        tag.putInt("OrbitIndex", this.getOrbitIndex());
+        // Owner saved by super
     }
-    
+
     @Override
-    protected void readAdditionalSaveData(ValueInput in) {
-        this.isLaunched = in.getBooleanOr("Launched", false); // Default false
-        this.entityData.set(LAUNCHED, this.isLaunched);
+    public void readAdditionalSaveData(CompoundTag tag) {
+        super.readAdditionalSaveData(tag);
+        boolean launched = tag.getBoolean("Launched");
+        this.entityData.set(LAUNCHED, launched);
+        if (tag.contains("OrbitIndex")) {
+            this.setOrbitIndex(tag.getInt("OrbitIndex"));
+        }
+        // Owner read by super
     }
-    
-    @Override
-    public boolean hurtServer(ServerLevel level, DamageSource source, float amount) {
-        return false; // Invulnerable
-    }
+    */
 }

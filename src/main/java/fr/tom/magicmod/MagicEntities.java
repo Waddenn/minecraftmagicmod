@@ -20,7 +20,7 @@ public class MagicEntities {
         BuiltInRegistries.ENTITY_TYPE,
         FLOATING_WEAPON_KEY,
         EntityType.Builder.<FloatingWeaponEntity>of(FloatingWeaponEntity::new, MobCategory.MISC)
-            .sized(0.5f, 0.5f)
+            .sized(0.3f, 0.3f)
             .clientTrackingRange(8)
             .updateInterval(1)
             .build(FLOATING_WEAPON_KEY)
