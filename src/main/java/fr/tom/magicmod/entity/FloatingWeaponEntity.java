@@ -121,10 +121,6 @@ public class FloatingWeaponEntity extends AbstractArrow {
             this.baseTick(); 
             
             // Server-Side Authority only.
-            // Client relies on high update frequency (updateInterval(1)) for interpolation.
-            this.baseTick(); 
-            
-            // Server-Side Authority only.
             // Client relies on Renderer for smooth interpolation.
             if (!this.level().isClientSide()) {
                 Entity owner = this.getOwner();
@@ -156,6 +152,18 @@ public class FloatingWeaponEntity extends AbstractArrow {
                         0, 0, 0);
             }
         }
+    }
+
+    @Override
+    protected boolean canHitEntity(Entity entity) {
+        // Prepare collision filtering: Ignore other swords and the owner
+        if (entity instanceof FloatingWeaponEntity) {
+            return false;
+        }
+        if (this.getOwner() != null && this.getOwner().equals(entity)) {
+            return false;
+        }
+        return super.canHitEntity(entity);
     }
 
     @Override
