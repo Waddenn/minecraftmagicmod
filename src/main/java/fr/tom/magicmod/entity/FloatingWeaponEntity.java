@@ -217,6 +217,24 @@ public class FloatingWeaponEntity extends AbstractArrow {
                 }
             } else {
                 Vec3 move = dir.normalize().scale(speed);
+                
+                // Return Damage Logic: Check for collisions along the path
+                if (!this.level().isClientSide()) {
+                    net.minecraft.world.phys.EntityHitResult hit = net.minecraft.world.entity.projectile.ProjectileUtil.getEntityHitResult(
+                        this.level(), this, currentPos, currentPos.add(move), 
+                        this.getBoundingBox().expandTowards(move).inflate(1.0), 
+                        this::canHitEntity
+                    );
+                    
+                    if (hit != null) {
+                        Entity target = hit.getEntity();
+                        Entity swordOwner = this.getOwner();
+                        // Apply damage but DO NOT stop the sword
+                        target.hurt(this.damageSources().indirectMagic(this, swordOwner != null ? swordOwner : this), (float)DAMAGE);
+                        this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 1.0F);
+                    }
+                }
+                
                 this.setPos(currentPos.add(move));
                 
                 // Visuals: Spin flat?
