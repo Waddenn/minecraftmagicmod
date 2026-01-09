@@ -45,9 +45,14 @@ public class FloatingWeaponEntity extends AbstractArrow {
         this.setNoGravity(true); // No gravity initially (while orbiting)
     }
 
+    // Server-side launch tracking
+    private long serverLaunchTime = 0;
+    private int groundDuration = 0;
+
     @Override
     protected ItemStack getDefaultPickupItem() {
-        return ItemStack.EMPTY;
+        // Return a valid item to prevent "0 minecraft:air" serialization errors
+        return new ItemStack(net.minecraft.world.item.Items.DIAMOND_SWORD);
     }
 
     // Projectile has setOwner(Entity)
@@ -57,6 +62,12 @@ public class FloatingWeaponEntity extends AbstractArrow {
     
     public void setOrbitIndex(int index) {
         this.entityData.set(ORBIT_INDEX, index);
+        // Persistence via Tags
+        if (!this.level().isClientSide()) {
+            // Remove old tags
+            this.getTags().removeIf(tag -> tag.startsWith("OrbitIndex:"));
+            this.addTag("OrbitIndex:" + index);
+        }
     }
     
     public int getOrbitIndex() {
@@ -65,6 +76,10 @@ public class FloatingWeaponEntity extends AbstractArrow {
 
     public void launch(Vec3 direction) {
         this.entityData.set(LAUNCHED, true);
+        if (!this.level().isClientSide()) {
+            this.addTag("Launched");
+            this.serverLaunchTime = this.level().getGameTime();
+        }
         // this.setNoGravity(false); // Disable gravity enable - keep it noGravity=true for straight flight
         
         // AbstractArrow shoot logic
@@ -117,6 +132,23 @@ public class FloatingWeaponEntity extends AbstractArrow {
 
     @Override
     public void tick() {
+        if (!this.level().isClientSide() && this.tickCount == 0) {
+            // Restore state from Tags (Persistence)
+            if (this.getTags().contains("Launched")) {
+                this.entityData.set(LAUNCHED, true);
+            }
+            for (String tag : this.getTags()) {
+                if (tag.startsWith("OrbitIndex:")) {
+                    try {
+                        int index = Integer.parseInt(tag.substring("OrbitIndex:".length()));
+                        this.entityData.set(ORBIT_INDEX, index);
+                    } catch (NumberFormatException e) {
+                        // Ignore malformed tag
+                    }
+                }
+            }
+        }
+
         if (!isLaunched()) {
             this.baseTick(); 
             
@@ -124,7 +156,16 @@ public class FloatingWeaponEntity extends AbstractArrow {
             // Client relies on Renderer for smooth interpolation.
             if (!this.level().isClientSide()) {
                 Entity owner = this.getOwner();
-                if (owner instanceof Player && owner.isAlive()) {
+                if (owner instanceof Player player && owner.isAlive()) {
+                    // DESPAWN LOGIC: If player is not holding the Grimoire, disappear.
+                    boolean holdingGrimoire = player.getMainHandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE) 
+                                           || player.getOffhandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE);
+                    
+                    if (!holdingGrimoire) {
+                        this.discard();
+                        return;
+                    }
+
                     long time = this.level().getGameTime();
                     int index = getOrbitIndex();
                     
@@ -142,6 +183,46 @@ public class FloatingWeaponEntity extends AbstractArrow {
             }
         } else {
             super.tick();
+            
+            if (!this.level().isClientSide()) {
+                // Lifespan Checks
+                if (serverLaunchTime == 0 && isLaunched()) {
+                    // Recover from reload
+                    serverLaunchTime = this.level().getGameTime();
+                }
+                
+                // 1. Flight Timeout: 10 seconds (200 ticks)
+                if (serverLaunchTime > 0 && this.level().getGameTime() - serverLaunchTime > 200) {
+                    this.discard();
+                    return;
+                }
+                
+                // 2. Ground Timeout: 2 seconds (40 ticks)
+                // 2. Ground/Stuck Timeout: 2 minutes (2400 ticks)
+                // Since 'inGround' field is not accessible, check if velocity is effectively zero.
+                if (this.getDeltaMovement().lengthSqr() < 0.001) {
+                    this.groundDuration++;
+                    
+                    // User Request: Launched swords stuck in ground should vanish if Grimoire is un-equipped.
+                    Entity owner = this.getOwner();
+                    if (owner instanceof Player player) {
+                        boolean holdingGrimoire = player.getMainHandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE) 
+                                               || player.getOffhandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE);
+                        if (!holdingGrimoire) {
+                            this.discard();
+                            return;
+                        }
+                    }
+
+                    if (this.groundDuration > 2400) {
+                         // User requested no timed despawn for stuck swords
+                         // keeping the counter logic valid but disabling the trigger
+                         // actually just removing the block is cleaner
+                    }
+                } else {
+                    this.groundDuration = 0;
+                }
+            }
             
             if (this.level().isClientSide() && this.getDeltaMovement().lengthSqr() > 0.1) {
                  Vec3 movement = this.getDeltaMovement();
@@ -174,8 +255,12 @@ public class FloatingWeaponEntity extends AbstractArrow {
     @Override
     protected void onHitBlock(BlockHitResult result) {
         super.onHitBlock(result); 
-        // TRIDENT_HIT is SoundEvent, TRIDENT_THROW is Holder (Mojang consistency...)
-        this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 1.0F);
+        // Sound handled by getHitGroundSoundEvent override
+    }
+
+    @Override
+    protected SoundEvent getDefaultHitGroundSoundEvent() {
+        return SoundEvents.TRIDENT_HIT;
     }
 
     @Override
@@ -185,24 +270,9 @@ public class FloatingWeaponEntity extends AbstractArrow {
         builder.define(ORBIT_INDEX, 0); // Default index 0
     }
     
-    /*
-    @Override
-    public void addAdditionalSaveData(CompoundTag tag) {
-        super.addAdditionalSaveData(tag);
-        tag.putBoolean("Launched", this.isLaunched());
-        tag.putInt("OrbitIndex", this.getOrbitIndex());
-        // Owner saved by super
-    }
-
-    @Override
-    public void readAdditionalSaveData(CompoundTag tag) {
-        super.readAdditionalSaveData(tag);
-        boolean launched = tag.getBoolean("Launched");
-        this.entityData.set(LAUNCHED, launched);
-        if (tag.contains("OrbitIndex")) {
-            this.setOrbitIndex(tag.getInt("OrbitIndex"));
-        }
-        // Owner read by super
-    }
-    */
+    // NBT Persistence handled via Scoreboard Tags in tick()
+    /* 
+     * NBT methods omitted due to mapping/wrapper issues.
+     * State is saved via entity.getTags() automatically by vanilla.
+     */
 }

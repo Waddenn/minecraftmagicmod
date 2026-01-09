@@ -1,0 +1,19 @@
+{
+    "type": "minecraft:crafting_shaped",
+    "category": "misc",
+    "pattern": [
+        " S ",
+        "PBP",
+        " E "
+    ],
+    "key": {
+        "S": "minecraft:diamond_sword",
+        "P": "minecraft:phantom_membrane",
+        "B": "minecraft:book",
+        "E": "minecraft:ender_eye"
+    },
+    "result": {
+        "id": "magicmod:spectral_grimoire",
+        "count": 1
+    }
+}
