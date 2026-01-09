@@ -56,11 +56,11 @@ public class SpectralGrimoireItem extends Item {
                 
                 // AIMING LOGIC
                 // Perform a RayCast (Clip) to find exactly what the player is looking at
-                // This allows the sword to converge on the target from its orbit position
                 net.minecraft.world.phys.Vec3 eyePos = player.getEyePosition();
                 net.minecraft.world.phys.Vec3 lookVec = player.getLookAngle();
                 net.minecraft.world.phys.Vec3 endPos = eyePos.add(lookVec.scale(100.0)); // 100 blocks range
                 
+                // 1. Block Raycast
                 net.minecraft.world.level.ClipContext context = new net.minecraft.world.level.ClipContext(
                     eyePos, endPos, 
                     net.minecraft.world.level.ClipContext.Block.COLLIDER, 
@@ -68,11 +68,36 @@ public class SpectralGrimoireItem extends Item {
                     player
                 );
                 
-                net.minecraft.world.phys.HitResult hitResult = level.clip(context);
-                net.minecraft.world.phys.Vec3 targetPos = hitResult.getLocation();
+                net.minecraft.world.phys.HitResult blockHit = level.clip(context);
+                net.minecraft.world.phys.Vec3 targetPos = blockHit.getLocation(); // Default to block hit
                 
-                // If we didn't hit anything close, use the far end point
-                if (hitResult.getType() == net.minecraft.world.phys.HitResult.Type.MISS) {
+                // 2. Entity Raycast (Aim Assist)
+                // Check if we are pointing at an entity. If so, prioritize it!
+                net.minecraft.world.phys.AABB searchBox = player.getBoundingBox().expandTowards(lookVec.scale(100.0)).inflate(1.0);
+                
+                net.minecraft.world.phys.EntityHitResult entityHit = net.minecraft.world.entity.projectile.ProjectileUtil.getEntityHitResult(
+                    player, 
+                    eyePos, 
+                    endPos, 
+                    searchBox, 
+                    (e) -> !e.isSpectator() && e.isPickable() && e != player && !(e instanceof FloatingWeaponEntity), 
+                    100.0 * 100.0 // Distance squared limit
+                );
+                
+                // If we hit an entity, and it's closer than the block hit (or we missed blocks)
+                if (entityHit != null) {
+                    double distToBlock = blockHit.getLocation().distanceToSqr(eyePos);
+                    double distToEntity = entityHit.getLocation().distanceToSqr(eyePos);
+                    
+                    if (distToEntity < distToBlock || blockHit.getType() == net.minecraft.world.phys.HitResult.Type.MISS) {
+                        // AIM ASSIST: Target the CENTER of the entity
+                        // This fixes parallax issues where aiming at the edge of a mob sends the projectile to the wall behind it.
+                        targetPos = entityHit.getEntity().getBoundingBox().getCenter();
+                    }
+                }
+                
+                // If we hit nothing, use the far end point
+                if (blockHit.getType() == net.minecraft.world.phys.HitResult.Type.MISS && entityHit == null) {
                     targetPos = endPos;
                 }
                 
@@ -99,16 +124,44 @@ public class SpectralGrimoireItem extends Item {
         if (livingEntity instanceof Player player && !level.isClientSide() && level instanceof ServerLevel serverLevel) {
              int useTime = getUseDuration(stack, livingEntity) - remainingUseDuration;
              
-             // Trigger summon at exactly 1 second (20 ticks)
-             if (useTime == 20) {
-                 // SUMMON
-                for (int i = 0; i < MAX_WEAPONS; i++) {
-                    FloatingWeaponEntity weapon = new FloatingWeaponEntity(MagicEntities.FLOATING_WEAPON, serverLevel);
-                    weapon.setPos(player.getX(), player.getY() + 1.5, player.getZ());
-                    weapon.setOwner(player);
-                    weapon.setOrbitIndex(i);
-                    serverLevel.addFreshEntity(weapon);
-                }
+              // Trigger summon at exactly 1 second (20 ticks)
+              if (useTime == 20) {
+                  // SUMMON LOGIC: Update to prevent duplication (reuse existing swords)
+                  List<FloatingWeaponEntity> existingWeapons = getAllWeapons(serverLevel, player);
+                  
+                  // 1. Recall existing ones
+                  for (FloatingWeaponEntity w : existingWeapons) {
+                      w.setReturning(true);
+                  }
+                  
+                  // 2. Spawn only missing ones
+                  int currentCount = existingWeapons.size();
+                  int needed = MAX_WEAPONS - currentCount;
+                  
+                  if (needed > 0) {
+                      for (int i = 0; i < needed; i++) {
+                         FloatingWeaponEntity weapon = new FloatingWeaponEntity(MagicEntities.FLOATING_WEAPON, serverLevel);
+                         weapon.setPos(player.getX(), player.getY() + 1.5, player.getZ());
+                         weapon.setOwner(player);
+                         // Index will be fixed below or by auto-assign? 
+                         // For now assign provisional, we should re-index all to be safe but let's just add new ones.
+                         // Ideally we'd sort and re-index 0..4
+                         weapon.setOrbitIndex(currentCount + i); 
+                         serverLevel.addFreshEntity(weapon);
+                      }
+                  } else if (currentCount > MAX_WEAPONS) {
+                      // Too many? (Edge case)
+                      // Do nothing, just recall them all.
+                  }
+                  
+                  // Re-indexing logic for perfect spacing
+                  // We can't easily re-index valid entities here instantly as new ones are just added.
+                  // But existing ones return to their *swapped* versions which have indices.
+                  // The new ones get indices starting from where existing left off.
+                  // This assumes existing ones have valid indices 0..N-1.
+                  // Since we are "Recalling", they will swap and keep their index.
+                  
+                 // Feedback
                 
                 // Feedback
                 serverLevel.sendParticles(ParticleTypes.ENCHANT, 
@@ -141,6 +194,19 @@ public class SpectralGrimoireItem extends Item {
                     return weapon.getOwner() != null 
                         && weapon.getOwner().equals(player)
                         && !weapon.isLaunched(); // Only count orbiting weapons
+                } catch (Exception e) {
+                    return false;
+                }
+            });
+    }
+
+    private List<FloatingWeaponEntity> getAllWeapons(ServerLevel level, Player player) {
+        return level.getEntitiesOfClass(FloatingWeaponEntity.class, 
+            player.getBoundingBox().inflate(256.0),
+            weapon -> {
+                try {
+                    return weapon.getOwner() != null 
+                        && weapon.getOwner().equals(player);
                 } catch (Exception e) {
                     return false;
                 }

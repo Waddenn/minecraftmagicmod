@@ -17,6 +17,8 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.EntityHitResult;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.List;
+
 public class FloatingWeaponEntity extends AbstractArrow {
     // Projectile handles owner
     private int orbitIndex = 0;
@@ -31,17 +33,19 @@ public class FloatingWeaponEntity extends AbstractArrow {
     // Synced Orbit Index to ensure Client/Server agree on position offset
     private static final net.minecraft.network.syncher.EntityDataAccessor<Integer> ORBIT_INDEX = 
         SynchedEntityData.defineId(FloatingWeaponEntity.class, net.minecraft.network.syncher.EntityDataSerializers.INT);
+    private static final net.minecraft.network.syncher.EntityDataAccessor<Boolean> RETURNING = 
+        SynchedEntityData.defineId(FloatingWeaponEntity.class, net.minecraft.network.syncher.EntityDataSerializers.BOOLEAN);
     
     // Client-side Visuals for smooth launch transition
     public Vec3 visualLaunchOffset = Vec3.ZERO;
     public long clientLaunchTime = 0;
+    // visual continuity tracking
+    public Vec3 clientLastRenderPos = Vec3.ZERO;
 
     public FloatingWeaponEntity(EntityType<? extends AbstractArrow> type, Level level) {
         super(type, level);
         this.setBaseDamage(DAMAGE);
-        // "pickup" field might be protected or named differently. 
-        // If not accessible, we rely on getDefaultPickupItem returning EMPTY.
-        // this.pickup = AbstractArrow.Pickup.DISALLOWED; 
+        this.pickup = AbstractArrow.Pickup.DISALLOWED; 
         this.setNoGravity(true); // No gravity initially (while orbiting)
     }
 
@@ -100,6 +104,17 @@ public class FloatingWeaponEntity extends AbstractArrow {
     public boolean isLaunched() {
         return this.entityData.get(LAUNCHED);
     }
+    
+    public void setReturning(boolean returning) {
+        this.entityData.set(RETURNING, returning);
+        if (returning) {
+            this.setNoGravity(true);
+        }
+    }
+
+    public boolean isReturning() {
+        return this.entityData.get(RETURNING);
+    }
 
     private boolean clientLaunched = false;
 
@@ -110,6 +125,7 @@ public class FloatingWeaponEntity extends AbstractArrow {
             boolean fired = this.entityData.get(LAUNCHED);
             if (fired && !clientLaunched) {
                 // Just launched on client side.
+                this.shakeTime = 0; // Ensure no residual shake from previous impact
                 // Snap rotation to velocity to prevent "Swoosh" interpolation from orbit angle.
                 this.clientLaunched = true;
                 
@@ -126,6 +142,9 @@ public class FloatingWeaponEntity extends AbstractArrow {
                     this.yRotO = yaw;
                     this.xRotO = pitch;
                 }
+            } else if (!fired) {
+                // Reset for next launch
+                this.clientLaunched = false;
             }
         }
     }
@@ -137,6 +156,9 @@ public class FloatingWeaponEntity extends AbstractArrow {
             if (this.getTags().contains("Launched")) {
                 this.entityData.set(LAUNCHED, true);
             }
+            if (this.getTags().contains("Returning")) {
+                this.entityData.set(RETURNING, true);
+            }
             for (String tag : this.getTags()) {
                 if (tag.startsWith("OrbitIndex:")) {
                     try {
@@ -147,6 +169,65 @@ public class FloatingWeaponEntity extends AbstractArrow {
                     }
                 }
             }
+        }
+
+        // --- RETURNING LOGIC ---
+        if (isReturning()) {
+            this.setNoGravity(true);
+            this.setDeltaMovement(Vec3.ZERO); // Override physics
+            
+            Entity owner = this.getOwner();
+            if (owner == null || !owner.isAlive()) {
+                this.disappear();
+                return;
+            }
+
+            // Calculate target position (Orbit or just Player)
+            long time = this.level().getGameTime();
+            int index = getOrbitIndex();
+            float currentAngle = (time * ORBIT_SPEED) + (float) (index * (Math.PI * 2 / 5.0));
+            double targetX = owner.getX() + Math.cos(currentAngle) * ORBIT_RADIUS;
+            // Target slightly higher to avoid hitting ground while returning
+            double targetY = owner.getY() + 1.5 + Math.sin(currentAngle * 3) * 0.3; 
+            double targetZ = owner.getZ() + Math.sin(currentAngle) * ORBIT_RADIUS;
+            
+            Vec3 targetPos = new Vec3(targetX, targetY, targetZ);
+            Vec3 currentPos = this.position();
+            Vec3 dir = targetPos.subtract(currentPos);
+            double distSqr = dir.lengthSqr();
+            
+            // Speed up as we get closer or just constant fast speed? 
+            // Constant speed + ease out looks good.
+            double speed = 0.8; 
+            if (distSqr < 1.0) {
+                // ARRIVED
+                this.setPos(targetX, targetY, targetZ);
+                if (!this.level().isClientSide()) {
+                    // Respawn as fresh entity to clear ALL AbstractArrow state (inGround, shake, etc)
+                    FloatingWeaponEntity replacement = new FloatingWeaponEntity(fr.tom.magicmod.MagicEntities.FLOATING_WEAPON, this.level());
+                    replacement.setPos(targetX, targetY, targetZ);
+                    replacement.setOwner((Player) owner);
+                    replacement.setOrbitIndex(index);
+                    // replacement is fresh, so LAUNCHED/RETURNING are false by default
+                    
+                    this.level().addFreshEntity(replacement);
+                    // Use TRIDENT_HIT for instant metallic "catch" sound without lead-in delay
+                    this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 1.0F);
+                    this.discard(); // destroy old one
+                }
+            } else {
+                Vec3 move = dir.normalize().scale(speed);
+                this.setPos(currentPos.add(move));
+                
+                // Visuals: Spin flat?
+                // Just face movement direction for now, maybe add spin later
+                // Updating rotation to face target
+                           // Force rotation update immediately to prevent 1-tick incorrect rendering
+                double horizontalDistance = Math.sqrt(move.x * move.x + move.z * move.z);
+                this.setYRot((float)(Math.atan2(move.x, move.z) * (180F / (float)Math.PI)));
+                this.setXRot((float)(Math.atan2(move.y, horizontalDistance) * (180F / (float)Math.PI)));
+            }
+            return; // Skip normal tick
         }
 
         if (!isLaunched()) {
@@ -185,26 +266,39 @@ public class FloatingWeaponEntity extends AbstractArrow {
             super.tick();
             
             if (!this.level().isClientSide()) {
+                Entity owner = this.getOwner();
+
+                // MANUAL RETURN TRIGGER
+                if (owner instanceof Player player) {
+                     boolean holdingGrimoire = player.getMainHandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE) 
+                                            || player.getOffhandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE);
+                     
+                     // If holding grimoire AND sneaking -> RETURN
+                     if (holdingGrimoire && player.isShiftKeyDown()) {
+                         this.setReturning(true);
+                         return; // switch to return logic next tick
+                     }
+                }
+
                 // Lifespan Checks
                 if (serverLaunchTime == 0 && isLaunched()) {
                     // Recover from reload
                     serverLaunchTime = this.level().getGameTime();
                 }
                 
-                // 1. Flight Timeout: 10 seconds (200 ticks)
+                // 1. Flight Timeout: 10 seconds -> Return instead of disappear
                 if (serverLaunchTime > 0 && this.level().getGameTime() - serverLaunchTime > 200) {
-                    this.disappear();
-                    return;
+                     // If flying for too long, come back.
+                     this.setReturning(true);
+                     return;
                 }
                 
-                // 2. Ground Timeout: 2 seconds (40 ticks)
-                // 2. Ground/Stuck Timeout: 2 minutes (2400 ticks)
-                // Since 'inGround' field is not accessible, check if velocity is effectively zero.
+                // 2. Ground Timeout
                 if (this.getDeltaMovement().lengthSqr() < 0.001) {
                     this.groundDuration++;
                     
                     // User Request: Launched swords stuck in ground should vanish if Grimoire is un-equipped.
-                    Entity owner = this.getOwner();
+                    // Also trigger automatic return after long delay?
                     if (owner instanceof Player player) {
                         boolean holdingGrimoire = player.getMainHandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE) 
                                                || player.getOffhandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE);
@@ -214,10 +308,9 @@ public class FloatingWeaponEntity extends AbstractArrow {
                         }
                     }
 
-                    if (this.groundDuration > 2400) {
-                         // User requested no timed despawn for stuck swords
-                         // keeping the counter logic valid but disabling the trigger
-                         // actually just removing the block is cleaner
+                    // Auto-return if stuck for 10 seconds?
+                    if (this.groundDuration > 200) {
+                        this.setReturning(true);
                     }
                 } else {
                     this.groundDuration = 0;
@@ -231,6 +324,33 @@ public class FloatingWeaponEntity extends AbstractArrow {
                         this.getY() + 0.5 - movement.y * 0.5, 
                         this.getZ() - movement.z * 0.5,
                         0, 0, 0);
+            }
+        }
+
+        
+        // Self-Correction: Check for duplicates (same owner, same index)
+        if (!this.level().isClientSide() && this.tickCount % 100 == 0) {
+            checkDuplicates();
+        }
+    }
+    
+    private void checkDuplicates() {
+        if (this.getOwner() == null) return;
+        
+        List<FloatingWeaponEntity> nearby = this.level().getEntitiesOfClass(FloatingWeaponEntity.class, 
+            this.getBoundingBox().inflate(100.0),
+            e -> e != this && e.isAlive() && e.getOwner() != null && e.getOwner().equals(this.getOwner())
+        );
+        
+        for (FloatingWeaponEntity other : nearby) {
+            // If another sword has the same Orbit Index as me...
+            if (other.getOrbitIndex() == this.getOrbitIndex()) {
+                // Conflict!
+                // Rule: Keep the NEWER one (Higher ID). Discard the OLDER one.
+                if (this.getId() < other.getId()) {
+                    this.discard();
+                    return; // I am dead.
+                }
             }
         }
     }
@@ -248,8 +368,29 @@ public class FloatingWeaponEntity extends AbstractArrow {
     }
 
     @Override
+    public void playerTouch(Player player) {
+        // Prevent pickup entirely.
+        if (!this.level().isClientSide() && (this.isNoPhysics()) && this.shakeTime <= 0) {
+              // Logic is fully custom, do not call super.playerTouch(player)
+        }
+    }
+
+    @Override
     protected void onHitEntity(EntityHitResult result) {
-        super.onHitEntity(result);
+        Entity target = result.getEntity();
+        Entity owner = this.getOwner();
+        
+        // Use Indirect Magic to bypass Enderman projectile immunity
+        // We use 'indirectMagic' which is generally unblockable by projectile evasion
+        // Use Indirect Magic to bypass Enderman projectile immunity
+        // We use 'indirectMagic' which is generally unblockable by projectile evasion
+        target.hurt(this.damageSources().indirectMagic(this, owner != null ? owner : this), (float)DAMAGE);
+        
+         // Apply Knockback if it's a living entity
+         if (target instanceof LivingEntity livingTarget) {
+             livingTarget.knockback(0.5, this.getX() - target.getX(), this.getZ() - target.getZ());
+         }
+         this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 1.0F);
     }
 
     @Override
@@ -267,6 +408,7 @@ public class FloatingWeaponEntity extends AbstractArrow {
     protected void defineSynchedData(SynchedEntityData.Builder builder) {
         super.defineSynchedData(builder); 
         builder.define(LAUNCHED, false);
+        builder.define(RETURNING, false);
         builder.define(ORBIT_INDEX, 0); // Default index 0
     }
     

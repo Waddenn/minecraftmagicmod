@@ -62,7 +62,8 @@ public class FloatingWeaponRenderer extends EntityRenderer<FloatingWeaponEntity,
         
         // Helper vars for orbit calculation
         float orbitSpeed = 0.05f; 
-        float angle = ((entity.tickCount + partialTick) * orbitSpeed) + (float) (entity.getOrbitIndex() * (Math.PI * 2 / 5.0));
+        // Use Global GameTime to match Server-Side logic (prevents desync on entity refesh)
+        float angle = ((entity.level().getGameTime() + partialTick) * orbitSpeed) + (float) (entity.getOrbitIndex() * (Math.PI * 2 / 5.0));
         
         if (!state.isLaunched) {
             Entity owner = entity.getOwner();
@@ -84,6 +85,9 @@ public class FloatingWeaponRenderer extends EntityRenderer<FloatingWeaponEntity,
                 Vec3 currentOffset = new Vec3(targetX - entityX, targetY - entityY, targetZ - entityZ);
                 state.orbitOffset = currentOffset;
                 
+                // Track absolute render position for continuity
+                entity.clientLastRenderPos = new Vec3(targetX, targetY, targetZ);
+                
                 // Keep the entity's cache updated so we have the last known good offset when launch happens
                 entity.visualLaunchOffset = currentOffset;
                 entity.clientLaunchTime = 0; // Reset
@@ -92,6 +96,16 @@ public class FloatingWeaponRenderer extends EntityRenderer<FloatingWeaponEntity,
              // LAUNCHED MODE - DECAY
              if (entity.clientLaunchTime == 0) {
                  entity.clientLaunchTime = entity.level().getGameTime();
+                 // CAPTURE CONTINUITY
+                 // We want the visual to start EXACTLY where we last rendered it.
+                 // Last Render Pos (World Space) - Current Entity Physics Pos (World Space) = Offset needed
+                 double entityX = Mth.lerp(partialTick, entity.xo, entity.getX());
+                 double entityY = Mth.lerp(partialTick, entity.yo, entity.getY());
+                 double entityZ = Mth.lerp(partialTick, entity.zo, entity.getZ());
+                 
+                 Vec3 currentPhysicsPos = new Vec3(entityX, entityY, entityZ);
+                 // The offset needed to shift "Physics Pos" back to "Visual Start Pos"
+                 entity.visualLaunchOffset = entity.clientLastRenderPos.subtract(currentPhysicsPos);
              }
              
              long timeSinceLaunch = entity.level().getGameTime() - entity.clientLaunchTime;
