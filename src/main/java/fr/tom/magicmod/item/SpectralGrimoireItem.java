@@ -13,6 +13,7 @@ import net.minecraft.sounds.SoundSource;
 import net.minecraft.core.particles.ParticleTypes;
 
 import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Entity;
 import net.minecraft.world.item.ItemUseAnimation;
 
 import fr.tom.magicmod.entity.FloatingWeaponEntity;
@@ -143,23 +144,22 @@ public class SpectralGrimoireItem extends Item {
                          FloatingWeaponEntity weapon = new FloatingWeaponEntity(MagicEntities.FLOATING_WEAPON, serverLevel);
                          weapon.setPos(player.getX(), player.getY() + 1.5, player.getZ());
                          weapon.setOwner(player);
-                         // Index will be fixed below or by auto-assign? 
-                         // For now assign provisional, we should re-index all to be safe but let's just add new ones.
-                         // Ideally we'd sort and re-index 0..4
-                         weapon.setOrbitIndex(currentCount + i); 
                          serverLevel.addFreshEntity(weapon);
+                         existingWeapons.add(weapon); // Add to list for indexing
                       }
                   } else if (currentCount > MAX_WEAPONS) {
                       // Too many? (Edge case)
                       // Do nothing, just recall them all.
                   }
                   
-                  // Re-indexing logic for perfect spacing
-                  // We can't easily re-index valid entities here instantly as new ones are just added.
-                  // But existing ones return to their *swapped* versions which have indices.
-                  // The new ones get indices starting from where existing left off.
-                  // This assumes existing ones have valid indices 0..N-1.
-                  // Since we are "Recalling", they will swap and keep their index.
+                  // 3. RE-INDEXING (The Fix)
+                  // Sort all weapons by ID (Oldest first) to maintain stability
+                  existingWeapons.sort(Comparator.comparingInt(Entity::getId));
+                  
+                  // Assign strict indices 0..N
+                  for (int i = 0; i < existingWeapons.size(); i++) {
+                      existingWeapons.get(i).setOrbitIndex(i);
+                  }
                   
                  // Feedback
                 

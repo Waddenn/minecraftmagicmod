@@ -97,8 +97,8 @@ public class FloatingWeaponEntity extends AbstractArrow {
         this.yRotO = this.getYRot();
         this.xRotO = this.getXRot();
 
-        // Play launch sound
-        this.playSound(SoundEvents.TRIDENT_THROW.value(), 1.0F, 1.0F);
+        // Play launch sound with variable pitch
+        this.playSound(SoundEvents.TRIDENT_THROW.value(), 1.0F, 0.9F + this.random.nextFloat() * 0.2F);
     }
 
     public boolean isLaunched() {
@@ -211,8 +211,8 @@ public class FloatingWeaponEntity extends AbstractArrow {
                     // replacement is fresh, so LAUNCHED/RETURNING are false by default
                     
                     this.level().addFreshEntity(replacement);
-                    // Use TRIDENT_HIT for instant metallic "catch" sound without lead-in delay
-                    this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 1.0F);
+                    // Use TRIDENT_HIT for instant metallic "catch" sound with variable pitch
+                    this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 0.9F + this.random.nextFloat() * 0.2F);
                     this.discard(); // destroy old one
                 }
             } else {
@@ -231,7 +231,7 @@ public class FloatingWeaponEntity extends AbstractArrow {
                         Entity swordOwner = this.getOwner();
                         // Apply damage but DO NOT stop the sword
                         target.hurt(this.damageSources().indirectMagic(this, swordOwner != null ? swordOwner : this), (float)DAMAGE);
-                        this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 1.0F);
+                        this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 0.9F + this.random.nextFloat() * 0.2F);
                     }
                 }
                 
@@ -408,7 +408,7 @@ public class FloatingWeaponEntity extends AbstractArrow {
          if (target instanceof LivingEntity livingTarget) {
              livingTarget.knockback(0.5, this.getX() - target.getX(), this.getZ() - target.getZ());
          }
-         this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 1.0F);
+         this.playSound(SoundEvents.TRIDENT_HIT, 1.0F, 0.9F + this.random.nextFloat() * 0.2F);
     }
 
     @Override
