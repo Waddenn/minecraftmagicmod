@@ -162,7 +162,7 @@ public class FloatingWeaponEntity extends AbstractArrow {
                                            || player.getOffhandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE);
                     
                     if (!holdingGrimoire) {
-                        this.discard();
+                        this.disappear();
                         return;
                     }
 
@@ -178,7 +178,7 @@ public class FloatingWeaponEntity extends AbstractArrow {
                     this.setPos(x, y, z);
                     this.setDeltaMovement(Vec3.ZERO);
                 } else if (owner == null) {
-                     this.discard();
+                     this.disappear();
                 }
             }
         } else {
@@ -193,7 +193,7 @@ public class FloatingWeaponEntity extends AbstractArrow {
                 
                 // 1. Flight Timeout: 10 seconds (200 ticks)
                 if (serverLaunchTime > 0 && this.level().getGameTime() - serverLaunchTime > 200) {
-                    this.discard();
+                    this.disappear();
                     return;
                 }
                 
@@ -209,7 +209,7 @@ public class FloatingWeaponEntity extends AbstractArrow {
                         boolean holdingGrimoire = player.getMainHandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE) 
                                                || player.getOffhandItem().is(fr.tom.magicmod.MagicItems.SPECTRAL_GRIMOIRE);
                         if (!holdingGrimoire) {
-                            this.discard();
+                            this.disappear();
                             return;
                         }
                     }
@@ -275,4 +275,12 @@ public class FloatingWeaponEntity extends AbstractArrow {
      * NBT methods omitted due to mapping/wrapper issues.
      * State is saved via entity.getTags() automatically by vanilla.
      */
+    private void disappear() {
+        if (!this.level().isClientSide()) {
+            this.level().playSound(null, this.getX(), this.getY(), this.getZ(), SoundEvents.ILLUSIONER_MIRROR_MOVE, this.getSoundSource(), 1.0F, 1.0F);
+            ((ServerLevel) this.level()).sendParticles(ParticleTypes.POOF, this.getX(), this.getY() + 0.5, this.getZ(), 5, 0.2, 0.2, 0.2, 0.05);
+            ((ServerLevel) this.level()).sendParticles(ParticleTypes.ENCHANTED_HIT, this.getX(), this.getY() + 0.5, this.getZ(), 5, 0.2, 0.2, 0.2, 0.05);
+        }
+        this.discard();
+    }
 }
