@@ -123,56 +123,86 @@ public class SpectralGrimoireItem extends Item {
     @Override
     public void onUseTick(Level level, LivingEntity livingEntity, ItemStack stack, int remainingUseDuration) {
         if (livingEntity instanceof Player player && !level.isClientSide() && level instanceof ServerLevel serverLevel) {
-             int useTime = getUseDuration(stack, livingEntity) - remainingUseDuration;
-             
-              // Trigger summon at exactly 1 second (20 ticks)
-              if (useTime == 20) {
-                  // SUMMON LOGIC: Update to prevent duplication (reuse existing swords)
-                  List<FloatingWeaponEntity> existingWeapons = getAllWeapons(serverLevel, player);
-                  
-                  // 1. Recall existing ones
-                  for (FloatingWeaponEntity w : existingWeapons) {
-                      w.setReturning(true);
-                  }
-                  
-                  // 2. Spawn only missing ones
-                  int currentCount = existingWeapons.size();
-                  int needed = MAX_WEAPONS - currentCount;
-                  
-                  if (needed > 0) {
-                      for (int i = 0; i < needed; i++) {
-                         FloatingWeaponEntity weapon = new FloatingWeaponEntity(MagicEntities.FLOATING_WEAPON, serverLevel);
-                         weapon.setPos(player.getX(), player.getY() + 1.5, player.getZ());
-                         weapon.setOwner(player);
-                         serverLevel.addFreshEntity(weapon);
-                         existingWeapons.add(weapon); // Add to list for indexing
-                      }
-                  } else if (currentCount > MAX_WEAPONS) {
-                      // Too many? (Edge case)
-                      // Do nothing, just recall them all.
-                  }
-                  
-                  // 3. RE-INDEXING (The Fix)
-                  // Sort all weapons by ID (Oldest first) to maintain stability
-                  existingWeapons.sort(Comparator.comparingInt(Entity::getId));
-                  
-                  // Assign strict indices 0..N
-                  for (int i = 0; i < existingWeapons.size(); i++) {
-                      existingWeapons.get(i).setOrbitIndex(i);
-                  }
-                  
-                 // Feedback
+            int useTime = getUseDuration(stack, livingEntity) - remainingUseDuration;
+            
+            // PHASE 1: CHARGING (0-20 ticks)
+            if (useTime < 20) {
+                 if (useTime % 5 == 0) {
+                     // Paladin Charging: Geometric Holy Light
+                     serverLevel.sendParticles(ParticleTypes.END_ROD, 
+                         player.getX(), player.getY() + 1, player.getZ(), 
+                         10, 0.5, 0.5, 0.5, 0.1);
+                     // Holy Hum
+                     level.playSound(null, player.getX(), player.getY(), player.getZ(), 
+                         SoundEvents.BEACON_AMBIENT, SoundSource.PLAYERS, 1.0f, 1.0f);
+                 }
+                 return;
+            }
+
+            // PHASE 2: RITUAL SUMMONING (Every 12 ticks after 20) -> SLOWER (0.6s)
+            if ((useTime - 20) % 12 == 0) {
+                List<FloatingWeaponEntity> existingWeapons = getAllWeapons(serverLevel, player);
                 
-                // Feedback
-                serverLevel.sendParticles(ParticleTypes.ENCHANT, 
-                    player.getX(), player.getY() + 1, player.getZ(), 
-                    50, 1.0, 1.0, 1.0, 0.5);
-                level.playSound(null, player.getX(), player.getY(), player.getZ(), 
-                    SoundEvents.ENCHANTMENT_TABLE_USE, SoundSource.PLAYERS, 1.0f, 0.8f);
+                // Ensure existing are recalling
+                for (FloatingWeaponEntity w : existingWeapons) {
+                    if (!w.isReturning()) w.setReturning(true);
+                }
                 
-                player.getCooldowns().addCooldown(stack, 40);
-                player.stopUsingItem(); // Finish using
-             }
+                int currentCount = existingWeapons.size();
+                
+                if (currentCount < MAX_WEAPONS) {
+                    // Spawn ONE sword
+                    FloatingWeaponEntity weapon = new FloatingWeaponEntity(MagicEntities.FLOATING_WEAPON, serverLevel);
+                    weapon.setPos(player.getX(), player.getY() + 1.5, player.getZ());
+                    weapon.setOwner(player);
+                    
+                    // Assign Smart Slot (No Shifting) - BEFORE spawning
+                    assignFreeSlot(existingWeapons, weapon);
+                    
+                    serverLevel.addFreshEntity(weapon);
+                    existingWeapons.add(weapon);
+                    
+                    // FX: Forge Sound (Heavy Anvil)
+                    level.playSound(null, player.getX(), player.getY(), player.getZ(), 
+                        SoundEvents.ANVIL_LAND, SoundSource.PLAYERS, 0.8f, 1.0f);
+                    
+                    // FX: Forging Sparks
+                    serverLevel.sendParticles(ParticleTypes.SCRAPE, 
+                        player.getX(), player.getY() + 1.5, player.getZ(), 
+                        20, 0.5, 0.5, 0.5, 0.1);
+                } 
+                else {
+                    // Ritual Complete (Full Set)
+                    // Paladin Finale: Electric Trident Thunder
+                    level.playSound(null, player.getX(), player.getY(), player.getZ(), 
+                        SoundEvents.TRIDENT_THUNDER, SoundSource.PLAYERS, 1.0f, 1.0f);
+                    
+                    // Holy Flash
+                    serverLevel.sendParticles(ParticleTypes.EXPLOSION_EMITTER, 
+                        player.getX(), player.getY() + 1.5, player.getZ(), 
+                        1, 0.0, 0.0, 0.0, 0.0);
+                        
+                    player.stopUsingItem();
+                    player.getCooldowns().addCooldown(stack, 60);
+                }
+            }
+        }
+    }
+
+    private void assignFreeSlot(List<FloatingWeaponEntity> existingWeapons, FloatingWeaponEntity newWeapon) {
+        boolean[] used = new boolean[MAX_WEAPONS];
+        for (FloatingWeaponEntity w : existingWeapons) {
+            int idx = w.getOrbitIndex();
+            if (idx >= 0 && idx < MAX_WEAPONS) {
+                used[idx] = true;
+            }
+        }
+        
+        for (int i = 0; i < MAX_WEAPONS; i++) {
+            if (!used[i]) {
+                newWeapon.setOrbitIndex(i);
+                return;
+            }
         }
     }
 

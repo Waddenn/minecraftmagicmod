@@ -47,7 +47,7 @@ public class FloatingWeaponRenderer extends EntityRenderer<FloatingWeaponEntity,
         super.extractRenderState(entity, state, partialTick);
         
         // Calculate spin
-        float time = (entity.tickCount + partialTick) * 10.0f;
+        float time = (entity.level().getGameTime() + partialTick) * 10.0f;
         state.spinRotation = time;
         
         // Extract orientation state
